@@ -11,7 +11,7 @@ def resource_path(*parts):
     return os.path.join(base, *parts)
 
 def cargar_config():
-    default_ip = "192.168.1.180"
+    default_ip = "172.20.10.6"
     default_port = 35001
     cfg = resource_path("config.json")
     if os.path.exists(cfg):
@@ -167,6 +167,8 @@ class cliente:
 
         self.bet_input = NumeroInput((W-260, BTN_Y, 160, 36), "Apuesta…")
         self.bet_visible_for_me = False
+        self.esperando_apuesta = False     # <- NUEVO
+        self.bet_error = ""                # <- NUEVO (mensaje de error visible)
 
         self.log_msgs = []; self.dealer_cards = []; self.players = []; self.image_cache = {}
 
@@ -273,6 +275,8 @@ class cliente:
         elif t == "PREGUNTAR_APUESTA":
             if msg.get("nombre") == self.mi_nombre:
                 self.bet_visible_for_me = True
+                self.esperando_apuesta = False
+                self.bet_error = ""  # reset error
                 self.bet_input.rect = self.centrar_rect(220, 40); self.bet_input.rect.y += 30
                 self.log("Escribe tu apuesta y presiona ENTER. (ESC cancela)")
             else:
@@ -282,6 +286,9 @@ class cliente:
             if msg.get("nombre") == self.mi_nombre:
                 try: self.saldo_cache -= int(msg.get("monto", 0))
                 except: pass
+                self.esperando_apuesta = False
+                self.bet_visible_for_me = False
+                self.bet_error = ""
         elif t == "RONDA_INICIADA":
             self.log("<< ¡Ronda iniciada!")
             self.en_apuestas = False; self.en_ronda = True
@@ -336,6 +343,13 @@ class cliente:
             self.log(f"<< {msg['nombre']} salió.")
         elif t == "ERROR":
             self.log(f"<< ERROR: {msg['mensaje']}")
+            if self.en_apuestas:
+                # Mantén abierto el overlay y muestra error visible
+                self.esperando_apuesta = False
+                self.bet_error = str(msg.get("mensaje", "Error"))
+                if not self.bet_visible_for_me and self.mi_nombre:
+                    self.bet_visible_for_me = True
+                self.log("Corrige la apuesta o presiona ESC para cancelar.")
 
     # Cierre
     def cerrar(self):
@@ -496,6 +510,8 @@ class cliente:
                     if self.bet_visible_for_me:
                         self.send_json({"tipo":"CANCELAR_APUESTA"})
                         self.bet_visible_for_me = False
+                        self.esperando_apuesta = False
+                        self.bet_error = ""
                     else:
                         self.cerrar()
 
@@ -510,14 +526,24 @@ class cliente:
                 res = self.nombre_input.handle(event)
                 if res and res[0] == "enter": self.conectar(res[1])
 
+                # --- Overlay de apuesta con validación local y espera de confirmación ---
                 if self.bet_visible_for_me:
                     bet_res = self.bet_input.handle(event)
-                    if bet_res and bet_res[0] == "enter":
+                    if bet_res and bet_res[0] == "enter" and not self.esperando_apuesta:
                         txt = bet_res[1].strip()
                         if txt.isdigit() and int(txt) > 0:
-                            self.send_json({"tipo":"APOSTAR","monto":int(txt)})
-                            self.bet_visible_for_me = False
+                            est = self.mi_estado()
+                            saldo_actual = est.get("saldo", self.saldo_cache) if est else self.saldo_cache
+                            if int(txt) > saldo_actual:
+                                self.bet_error = "Fondos insuficientes."
+                                self.log("Fondos insuficientes. Ingresa otra cantidad o ESC para cancelar.")
+                            else:
+                                self.esperando_apuesta = True
+                                self.bet_error = ""
+                                self.send_json({"tipo":"APOSTAR","monto":int(txt)})
+                                self.log("Apuesta enviada. Esperando confirmación...")
                         else:
+                            self.bet_error = "Monto inválido."
                             self.log("Monto inválido.")
 
             try:
@@ -544,14 +570,21 @@ class cliente:
             if self.bet_visible_for_me:
                 overlay = pygame.Surface((W, H), pygame.SRCALPHA); overlay.fill((0,0,0,140))
                 self.screen.blit(overlay, (0,0))
-                panel_rect = self.centrar_rect(460, 190)
+                panel_rect = self.centrar_rect(460, 210)
                 pygame.draw.rect(self.screen, (40,45,54), panel_rect, border_radius=14)
                 titulo = self.font.render("Tu apuesta", True, (240,240,240))
                 subt   = self.font_small.render("(ENTER para confirmar, ESC para cancelar)", True, (180,180,180))
                 self.screen.blit(titulo, titulo.get_rect(center=(panel_rect.centerx, panel_rect.top+40)))
                 self.screen.blit(subt,   subt.get_rect(center=(panel_rect.centerx, panel_rect.top+70)))
-                self.bet_input.rect.centerx = panel_rect.centerx; self.bet_input.rect.y = panel_rect.top+100
+                self.bet_input.rect.centerx = panel_rect.centerx
+                self.bet_input.rect.y = panel_rect.top+100
                 self.bet_input.draw(self.screen, self.font)
+
+                # Mensaje de error (rojo) debajo del input
+                if self.bet_error:
+                    err = self.font_small.render(self.bet_error, True, (220, 80, 80))
+                    err_rect = err.get_rect(center=(panel_rect.centerx, self.bet_input.rect.bottom + 18))
+                    self.screen.blit(err, err_rect)
 
             if self.conectado:
                 if not (self.mostrando_resultados or self.en_apuestas):
